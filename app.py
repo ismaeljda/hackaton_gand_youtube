@@ -1,5 +1,5 @@
 # app.py - Backend Flask avec système de mémoire
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 from memory_system import ContextualTranscriptProcessorWithMemory
 import os
@@ -98,10 +98,8 @@ def ask_question():
 
 @app.route('/ask/stream', methods=['POST'])
 def ask_question_stream():
-    """Endpoint avec streaming SSE pour réponses progressives"""
+    """Endpoint avec streaming SSE pour réponses progressives (texte seulement, audio côté client)"""
     try:
-        from flask import Response, stream_with_context
-
         data = request.get_json(force=True, silent=True) or {}
         video_id = data.get("video_id")
         current_time = data.get("current_time", 0)
@@ -118,7 +116,7 @@ def ask_question_stream():
                 transcript = processor.transcript_processor.get_transcript(video_id)
 
                 if not transcript:
-                    yield f"data: {jsonify({'error': 'Transcript non disponible'}).get_data(as_text=True)}\n\n"
+                    yield f"data: {json.dumps({'type': 'error', 'error': 'Transcript non disponible'})}\n\n"
                     return
 
                 contextual_data = processor.transcript_processor.create_contextual_windows(transcript, current_time)
@@ -126,6 +124,7 @@ def ask_question_stream():
 
                 # Appel OpenAI en streaming
                 full_response = ""
+
                 stream = processor.client.chat.completions.create(
                     model="gpt-4",
                     messages=[
@@ -141,20 +140,21 @@ def ask_question_stream():
                     if chunk.choices[0].delta.content:
                         content = chunk.choices[0].delta.content
                         full_response += content
-                        # Envoyer le chunk au client
-                        yield f"data: {json.dumps({'chunk': content})}\n\n"
+
+                        # Envoyer seulement le texte (le TTS sera géré côté client avec Web Speech API)
+                        yield f"data: {json.dumps({'type': 'text', 'chunk': content})}\n\n"
 
                 # Sauvegarder dans la mémoire
                 processor.memory.add_message(video_id, question, full_response, current_time, user_id)
 
                 # Envoyer le message de fin
-                yield f"data: {json.dumps({'done': True, 'full_response': full_response})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'full_response': full_response})}\n\n"
 
             except Exception as e:
                 print(f"❌ Erreur streaming: {e}")
                 import traceback
                 traceback.print_exc()
-                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
 
         return Response(
             stream_with_context(generate()),
