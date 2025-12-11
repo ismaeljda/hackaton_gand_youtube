@@ -14,7 +14,7 @@ class ContextualTranscriptProcessor:
             
             # Utiliser votre méthode fetch qui fonctionnait hier
             api = YouTubeTranscriptApi()
-            transcript_obj = api.fetch(video_id)
+            transcript_obj = api.fetch(video_id, languages=['en', 'en-US', 'fr'])
             segments_data = []
             
             print(f"Debug: Type d'objet transcript: {type(transcript_obj)}")

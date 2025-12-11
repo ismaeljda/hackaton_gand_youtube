@@ -172,6 +172,11 @@ class YouTubeAIAssistant {
       </div>
       
       <div class="ai-chat-input">
+        <button id="ai-mic-btn" title="Poser une question vocale">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12,2A3,3 0 0,1 15,5V11A3,3 0 0,1 12,14A3,3 0 0,1 9,11V5A3,3 0 0,1 12,2M19,11C19,14.53 16.39,17.44 13,17.93V21H11V17.93C7.61,17.44 5,14.53 5,11H7A5,5 0 0,0 12,16A5,5 0 0,0 17,11H19Z" />
+          </svg>
+        </button>
         <input type="text" id="ai-question-input" placeholder="Pose ta question..." />
         <button id="ai-send-btn">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
@@ -199,11 +204,20 @@ class YouTubeAIAssistant {
     // Envoyer une question
     const sendButton = this.chatContainer.querySelector('#ai-send-btn');
     const input = this.chatContainer.querySelector('#ai-question-input');
-    
+    const micButton = this.chatContainer.querySelector('#ai-mic-btn');
+
     sendButton.addEventListener('click', () => this.sendQuestion());
     input.addEventListener('keypress', (e) => {
       if (e.key === 'Enter') this.sendQuestion();
     });
+
+    // Microphone button
+    micButton.addEventListener('click', () => this.startVoiceQuestion());
+
+    // Initialiser les variables pour la reconnaissance vocale
+    this.recognition = null;
+    this.isRecording = false;
+    this.speechSynthesis = window.speechSynthesis;
   }
 
   toggleChat() {
@@ -255,11 +269,14 @@ class YouTubeAIAssistant {
     try {
       // Appeler votre backend
       const response = await this.callBackend(videoId, currentTime, question);
-      
+
       // Ajouter la réponse de l'IA au chat
       this.addMessage('ai', response);
       this.setStatus('');
-      
+
+      // Lire la réponse à voix haute
+      this.speakResponse(response);
+
     } catch (error) {
       console.error('Erreur:', error);
       this.addMessage('ai', 'Désolé, une erreur est survenue. Réessayez plus tard.');
@@ -323,6 +340,105 @@ class YouTubeAIAssistant {
         </div>
       </div>
     `;
+  }
+
+  startVoiceQuestion() {
+    if (this.isRecording) {
+      this.stopRecording();
+      return;
+    }
+
+    // Vérifier si le navigateur supporte la reconnaissance vocale
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      this.addMessage('ai', '❌ Votre navigateur ne supporte pas la reconnaissance vocale.');
+      return;
+    }
+
+    // Initialiser la reconnaissance vocale
+    this.recognition = new SpeechRecognition();
+    this.recognition.lang = 'fr-FR';
+    this.recognition.continuous = false;
+    this.recognition.interimResults = false;
+
+    const micButton = this.chatContainer.querySelector('#ai-mic-btn');
+
+    this.recognition.onstart = () => {
+      this.isRecording = true;
+      micButton.style.color = '#ff0000';
+      this.setStatus('🎤 Écoute en cours...');
+    };
+
+    this.recognition.onresult = async (event) => {
+      const transcript = event.results[0][0].transcript;
+      console.log('🎤 Transcription:', transcript);
+
+      // Mettre la question dans l'input
+      const input = this.chatContainer.querySelector('#ai-question-input');
+      input.value = transcript;
+
+      // Envoyer la question
+      await this.sendQuestion();
+    };
+
+    this.recognition.onerror = (event) => {
+      console.error('❌ Erreur reconnaissance vocale:', event.error);
+      this.isRecording = false;
+      micButton.style.color = '';
+      this.setStatus('');
+      this.addMessage('ai', '❌ Erreur lors de la reconnaissance vocale. Réessayez.');
+    };
+
+    this.recognition.onend = () => {
+      this.isRecording = false;
+      micButton.style.color = '';
+      this.setStatus('');
+    };
+
+    // Démarrer l'enregistrement
+    try {
+      this.recognition.start();
+    } catch (error) {
+      console.error('❌ Erreur démarrage micro:', error);
+      this.addMessage('ai', '❌ Impossible de démarrer le microphone.');
+    }
+  }
+
+  stopRecording() {
+    if (this.recognition) {
+      this.recognition.stop();
+    }
+  }
+
+  speakResponse(text) {
+    // Arrêter toute lecture en cours
+    this.speechSynthesis.cancel();
+
+    // Créer l'utterance
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'fr-FR';
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+
+    // Événements
+    utterance.onstart = () => {
+      console.log('🔊 Début de la lecture audio');
+      this.setStatus('🔊 Lecture en cours...');
+    };
+
+    utterance.onend = () => {
+      console.log('✅ Fin de la lecture audio');
+      this.setStatus('');
+    };
+
+    utterance.onerror = (event) => {
+      console.error('❌ Erreur TTS:', event);
+      this.setStatus('');
+    };
+
+    // Lancer la lecture
+    this.speechSynthesis.speak(utterance);
   }
 }
 

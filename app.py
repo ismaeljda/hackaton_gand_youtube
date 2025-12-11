@@ -5,12 +5,15 @@ from memory_system import ContextualTranscriptProcessorWithMemory
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 app = Flask(__name__)
 CORS(app)  # Permettre les requêtes depuis l'extension
 
 # Initialiser le processeur avec mémoire
-API_KEY = os.getenv('OPENAI_API_KEY', 'api_key')
+API_KEY = os.getenv('OPENAI_API_KEY')
+if not API_KEY:
+    raise ValueError("OPENAI_API_KEY non trouvée dans le fichier .env")
+print(f"🔑 Clé API chargée: {API_KEY[:20]}...")
 processor = ContextualTranscriptProcessorWithMemory(API_KEY)
 
 @app.route('/ask', methods=['POST'])

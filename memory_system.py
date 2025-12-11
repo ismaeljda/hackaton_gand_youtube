@@ -151,6 +151,7 @@ class ContextualTranscriptProcessorWithMemory:
         
         # 4. Interroger l'IA
         try:
+            print(f"🤖 Appel OpenAI avec modèle: gpt-4")
             response = self.client.chat.completions.create(
                 model="gpt-4",
                 messages=[
@@ -160,19 +161,23 @@ class ContextualTranscriptProcessorWithMemory:
                 max_tokens=600,
                 temperature=0.7
             )
-            
+
             ai_response = response.choices[0].message.content
-            
+            print(f"✅ Réponse OpenAI reçue: {len(ai_response)} caractères")
+
             # 5. Sauvegarder dans la mémoire
             self.memory.add_message(video_id, question, ai_response, current_time, user_id)
-            
+
             return {
                 "response": ai_response,
                 "has_conversation_history": bool(conversation_context),
                 "conversation_length": len(self.memory.get_conversation_history(video_id, user_id))
             }
-            
+
         except Exception as e:
+            print(f"❌ Erreur OpenAI: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             return {"error": f"Erreur lors de la génération de la réponse: {e}"}
     
     def build_ai_prompt_with_memory(self, contextual_data: Dict, user_question: str, 
