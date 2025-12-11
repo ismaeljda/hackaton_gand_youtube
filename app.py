@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from memory_system import ContextualTranscriptProcessorWithMemory
 import os
+import json
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -11,9 +12,14 @@ CORS(app)  # Permettre les requêtes depuis l'extension
 
 # Initialiser le processeur avec mémoire
 API_KEY = os.getenv('OPENAI_API_KEY')
+ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY')
 if not API_KEY:
     raise ValueError("OPENAI_API_KEY non trouvée dans le fichier .env")
-print(f"🔑 Clé API chargée: {API_KEY[:20]}...")
+if not ELEVENLABS_API_KEY:
+    print("⚠️ ELEVENLABS_API_KEY non trouvée, TTS désactivé")
+print(f"🔑 Clé API OpenAI chargée: {API_KEY[:20]}...")
+if ELEVENLABS_API_KEY:
+    print(f"🔑 Clé API ElevenLabs chargée: {ELEVENLABS_API_KEY[:20]}...")
 processor = ContextualTranscriptProcessorWithMemory(API_KEY)
 
 @app.route('/ask', methods=['POST'])
@@ -88,6 +94,139 @@ def ask_question():
             "error": "Erreur interne du serveur",
             "details": str(e)
         }), 500
+
+
+@app.route('/ask/stream', methods=['POST'])
+def ask_question_stream():
+    """Endpoint avec streaming SSE pour réponses progressives"""
+    try:
+        from flask import Response, stream_with_context
+
+        data = request.get_json(force=True, silent=True) or {}
+        video_id = data.get("video_id")
+        current_time = data.get("current_time", 0)
+        question = data.get("question")
+        user_id = data.get("user_id", "browser_session")
+
+        if not video_id or not question:
+            return jsonify({"error": "video_id et question sont requis"}), 400
+
+        def generate():
+            try:
+                # Récupérer le contexte
+                conversation_context = processor.memory.get_conversation_context(video_id, user_id)
+                transcript = processor.transcript_processor.get_transcript(video_id)
+
+                if not transcript:
+                    yield f"data: {jsonify({'error': 'Transcript non disponible'}).get_data(as_text=True)}\n\n"
+                    return
+
+                contextual_data = processor.transcript_processor.create_contextual_windows(transcript, current_time)
+                prompt = processor.build_ai_prompt_with_memory(contextual_data, question, conversation_context)
+
+                # Appel OpenAI en streaming
+                full_response = ""
+                stream = processor.client.chat.completions.create(
+                    model="gpt-4",
+                    messages=[
+                        {"role": "system", "content": "Tu es un assistant IA spécialisé dans l'explication de contenu vidéo avec mémoire des conversations précédentes."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=600,
+                    temperature=0.7,
+                    stream=True
+                )
+
+                for chunk in stream:
+                    if chunk.choices[0].delta.content:
+                        content = chunk.choices[0].delta.content
+                        full_response += content
+                        # Envoyer le chunk au client
+                        yield f"data: {json.dumps({'chunk': content})}\n\n"
+
+                # Sauvegarder dans la mémoire
+                processor.memory.add_message(video_id, question, full_response, current_time, user_id)
+
+                # Envoyer le message de fin
+                yield f"data: {json.dumps({'done': True, 'full_response': full_response})}\n\n"
+
+            except Exception as e:
+                print(f"❌ Erreur streaming: {e}")
+                import traceback
+                traceback.print_exc()
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no'
+            }
+        )
+
+    except Exception as e:
+        print(f"🚨 Erreur: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/tts/elevenlabs', methods=['POST'])
+def text_to_speech_elevenlabs():
+    """Endpoint pour convertir le texte en audio avec ElevenLabs"""
+    try:
+        import requests
+
+        if not ELEVENLABS_API_KEY:
+            return jsonify({"error": "ElevenLabs API key non configurée"}), 500
+
+        data = request.get_json()
+        text = data.get('text', '')
+
+        if not text:
+            return jsonify({"error": "Texte requis"}), 400
+
+        # Paramètres ElevenLabs
+        VOICE_ID = "21m00Tcm4TlvDq8ikWAM"  # Rachel voice (ou choisissez une autre voix)
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}/stream"
+
+        headers = {
+            "Accept": "audio/mpeg",
+            "Content-Type": "application/json",
+            "xi-api-key": ELEVENLABS_API_KEY
+        }
+
+        payload = {
+            "text": text,
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.5
+            }
+        }
+
+        response = requests.post(url, json=payload, headers=headers, stream=True)
+
+        if response.status_code != 200:
+            return jsonify({"error": f"ElevenLabs API error: {response.status_code}"}), 500
+
+        # Streamer l'audio au client
+        from flask import Response
+        return Response(
+            response.iter_content(chunk_size=1024),
+            mimetype='audio/mpeg',
+            headers={
+                'Content-Type': 'audio/mpeg',
+                'Cache-Control': 'no-cache'
+            }
+        )
+
+    except Exception as e:
+        print(f"❌ Erreur TTS ElevenLabs: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/ask/simple', methods=['POST'])

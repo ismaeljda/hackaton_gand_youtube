@@ -8,7 +8,8 @@
     "storage"
   ],
   "host_permissions": [
-    "*://*.youtube.com/*"
+    "*://*.youtube.com/*",
+    "http://localhost:5000/*"
   ],
   "content_scripts": [
     {

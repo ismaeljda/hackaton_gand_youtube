@@ -267,15 +267,14 @@ class YouTubeAIAssistant {
     this.setStatus('Analyse de la vidéo...');
     
     try {
-      // Appeler votre backend
-      const response = await this.callBackend(videoId, currentTime, question);
+      // Réinitialiser la queue TTS pour une nouvelle question
+      this.ttsQueue = { lastSpokenIndex: 0, isSpeaking: false };
 
-      // Ajouter la réponse de l'IA au chat
-      this.addMessage('ai', response);
+      // Appeler votre backend (streaming)
+      const response = await this.callBackendStream(videoId, currentTime, question);
+
+      // La réponse est déjà affichée progressivement dans callBackendStream
       this.setStatus('');
-
-      // Lire la réponse à voix haute
-      this.speakResponse(response);
 
     } catch (error) {
       console.error('Erreur:', error);
@@ -284,26 +283,87 @@ class YouTubeAIAssistant {
     }
   }
 
-  async callBackend(videoId, currentTime, question) {
-    // Appel à votre API backend
-    const response = await fetch('http://localhost:5000/ask', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        video_id: videoId,
-        current_time: currentTime,
-        question: question
-      })
+  async callBackendStream(videoId, currentTime, question) {
+    // Utiliser l'endpoint streaming pour réponses progressives
+    return new Promise((resolve, reject) => {
+      fetch('http://localhost:5000/ask/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          video_id: videoId,
+          current_time: currentTime,
+          question: question
+        })
+      }).then(response => {
+        if (!response.ok) {
+          throw new Error('Erreur réseau');
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let fullResponse = '';
+        let currentMessage = null;
+
+        const readStream = () => {
+          reader.read().then(({ done, value }) => {
+            if (done) {
+              resolve(fullResponse);
+              return;
+            }
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.substring(6));
+
+                  if (data.error) {
+                    reject(new Error(data.error));
+                    return;
+                  }
+
+                  if (data.chunk) {
+                    fullResponse += data.chunk;
+
+                    // Afficher progressivement dans le chat
+                    if (!currentMessage) {
+                      const messagesContainer = this.chatContainer.querySelector('#ai-chat-messages');
+                      const messageDiv = document.createElement('div');
+                      messageDiv.className = 'ai-message';
+                      messageDiv.innerHTML = '<div class="message-content"></div>';
+                      messagesContainer.appendChild(messageDiv);
+                      currentMessage = messageDiv.querySelector('.message-content');
+                    }
+
+                    currentMessage.textContent = fullResponse;
+                    this.chatContainer.querySelector('#ai-chat-messages').scrollTop =
+                      this.chatContainer.querySelector('#ai-chat-messages').scrollHeight;
+
+                    // TTS progressif : lire par phrases complètes
+                    this.speakProgressively(fullResponse);
+                  }
+
+                  if (data.done) {
+                    resolve(fullResponse);
+                    return;
+                  }
+                } catch (e) {
+                  console.error('Erreur parsing JSON:', e);
+                }
+              }
+            }
+
+            readStream();
+          }).catch(reject);
+        };
+
+        readStream();
+      }).catch(reject);
     });
-    
-    if (!response.ok) {
-      throw new Error('Erreur réseau');
-    }
-    
-    const data = await response.json();
-    return data.response;
   }
 
   addMessage(sender, content) {
@@ -439,6 +499,91 @@ class YouTubeAIAssistant {
 
     // Lancer la lecture
     this.speechSynthesis.speak(utterance);
+  }
+
+  async speakProgressively(fullText) {
+    // Initialiser la queue si nécessaire
+    if (!this.ttsQueue) {
+      this.ttsQueue = {
+        lastSpokenIndex: 0,
+        isSpeaking: false,
+        audioQueue: []
+      };
+    }
+
+    // Découper le texte en phrases complètes
+    const sentences = fullText.match(/[^.!?]+[.!?]+/g) || [];
+
+    // Calculer combien de phrases complètes nous avons
+    const completeSentences = sentences.slice(this.ttsQueue.lastSpokenIndex);
+
+    // Ne lire que s'il y a au moins une nouvelle phrase complète
+    if (completeSentences.length > 0 && !this.ttsQueue.isSpeaking) {
+      const nextSentence = completeSentences[0];
+      this.ttsQueue.isSpeaking = true;
+
+      try {
+        // Appeler l'API ElevenLabs pour générer l'audio
+        const response = await fetch('http://localhost:5000/tts/elevenlabs', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            text: nextSentence
+          })
+        });
+
+        if (!response.ok) {
+          throw new Error('Erreur TTS');
+        }
+
+        // Convertir la réponse en blob audio
+        const audioBlob = await response.blob();
+        const audioUrl = URL.createObjectURL(audioBlob);
+
+        // Créer un élément audio et le jouer
+        const audio = new Audio(audioUrl);
+
+        audio.onended = () => {
+          this.ttsQueue.isSpeaking = false;
+          this.ttsQueue.lastSpokenIndex++;
+          URL.revokeObjectURL(audioUrl);
+
+          // Continuer avec la phrase suivante si disponible
+          if (this.ttsQueue.lastSpokenIndex < sentences.length) {
+            this.speakProgressively(fullText);
+          }
+        };
+
+        audio.onerror = () => {
+          console.error('Erreur lecture audio');
+          this.ttsQueue.isSpeaking = false;
+        };
+
+        await audio.play();
+
+      } catch (error) {
+        console.error('Erreur TTS ElevenLabs:', error);
+        this.ttsQueue.isSpeaking = false;
+
+        // Fallback vers le TTS du navigateur
+        const utterance = new SpeechSynthesisUtterance(nextSentence);
+        utterance.lang = 'fr-FR';
+        utterance.rate = 1.0;
+
+        utterance.onend = () => {
+          this.ttsQueue.isSpeaking = false;
+          this.ttsQueue.lastSpokenIndex++;
+
+          if (this.ttsQueue.lastSpokenIndex < sentences.length) {
+            this.speakProgressively(fullText);
+          }
+        };
+
+        this.speechSynthesis.speak(utterance);
+      }
+    }
   }
 }
 
